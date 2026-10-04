@@ -1,1 +1,4 @@
 dev-log.md
+.env
+*.exe
+bin/
