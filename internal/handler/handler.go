@@ -1,60 +1,66 @@
-package handler 
+package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/url"
-	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/anktzz/ur-short/internal/base62"
+	"github.com/anktzz/ur-short/internal/store"
 )
 
-type Handler struct {
-	mu sync.Mutex
-	urls map[uint64]string
-	next uint64
+type Store interface {
+	Create(ctx context.Context, longURL string) (uint64, error)
+	Get(ctx context.Context, id uint64) (string, error)
 }
 
-func New() *Handler {
-	return &Handler{urls: make(map[uint64]string), next: 1}
+type Handler struct {
+	store   Store
+	baseURL string
+}
+
+func New(s Store, baseURL string) *Handler {
+	return &Handler{store: s, baseURL: baseURL}
 }
 
 type shortenRequest struct {
-	LongUrl string `json:"long_url"`
+	LongURL string `json:"long_url"`
 }
 
 type shortenResponse struct {
 	ShortCode string `json:"short_code"`
-	ShortUrl string `json:"short_url"`
+	ShortURL  string `json:"short_url"`
 }
 
 func (h *Handler) Shorten(w http.ResponseWriter, r *http.Request) {
-
 	var req shortenRequest
-	if err:= json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid Json", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-
-	u, err := url.ParseRequestURI(req.LongUrl) 
+	u, err := url.ParseRequestURI(req.LongURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		http.Error(w, "Invalid Url", http.StatusBadRequest)
+		http.Error(w, "invalid url", http.StatusBadRequest)
 		return
 	}
 
-	h.mu.Lock()
-	id := h.next
-	h.next++
-	h.urls[id] = req.LongUrl
-	h.mu.Unlock()
+	id, err := h.store.Create(r.Context(), req.LongURL)
+	if err != nil {
+		log.Println("create failed:", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 
 	code := base62.Encode(id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(shortenResponse{
 		ShortCode: code,
-		ShortUrl: "http://localhost:8080" + code,
+		ShortURL:  h.baseURL + "/" + code,
 	})
 }
 
@@ -66,11 +72,14 @@ func (h *Handler) Redirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-	long, ok := h.urls[id]
-	h.mu.Unlock()
-	if !ok {
+	long, err := h.store.Get(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
 		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		log.Println("get failed:", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	http.Redirect(w, r, long, http.StatusFound)
